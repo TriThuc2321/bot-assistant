@@ -118,31 +118,19 @@ def test_resolve_by_name_creates_when_missing():
 
 # --- listing ---------------------------------------------------------------
 
-def test_list_indexed_parses_attributes_and_skips_foreign_files():
+def test_list_files_parses_attributes_and_keeps_foreign_files():
     client = FakeClient(files=[
         vs_file("f1", attributes=attrs("1")),
         vs_file("f2", attributes=None),
         vs_file("f3", attributes={"something": "else"}),
     ])
-    store = VectorStore(client, "vs_1")
-    index = store.list_indexed()
-    assert list(index) == ["1"]
-    f = index["1"]
-    assert f == IndexedFile(
+    files = VectorStore(client, "vs_1").list_files()
+    assert files[0] == IndexedFile(
         id="f1", article_id="1", slug="1-slug", content_hash="sha256:abc",
         source_updated_at="2026-01-01T00:00:00Z",
         url="https://example.test/hc/en-us/articles/1", created_at=1, status="completed",
     )
-    assert len(store.list_files()) == 3
-
-
-def test_list_indexed_keeps_newest_duplicate():
-    client = FakeClient(files=[
-        vs_file("f_new", created_at=20, attributes=attrs("1")),
-        vs_file("f_old", created_at=10, attributes=attrs("1")),
-        vs_file("f_mid", created_at=15, attributes=attrs("1")),
-    ])
-    assert VectorStore(client, "vs_1").list_indexed()["1"].id == "f_new"
+    assert [f.article_id for f in files] == ["1", "", ""]
 
 
 # --- add / remove / replace ---------------------------------------------------

@@ -1,13 +1,13 @@
-"""Entrypoint: scrape (spec 01) -> convert to Markdown (spec 02) -> upload (spec 03).
-
-Upload is currently "everything not yet indexed"; spec 04 replaces that loop with
-hash-based add/update/skip/remove."""
+"""Entrypoint: scrape (spec 01) -> convert to Markdown (spec 02) -> delta sync (spec 04)
+against the vector store (spec 03) -> RUN SUMMARY + artifacts/last_run.json."""
 
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import openai
@@ -15,17 +15,13 @@ import openai
 from bot.config import ConfigError, load_config
 from bot.logging_setup import setup_logging
 from bot.markdown import slugify, write_markdown
-from bot.vector_store import (
-    UploadError,
-    VectorStore,
-    build_client,
-    content_hash,
-    estimate_chunks,
-    resolve_vector_store,
-)
+from bot.sync import apply, build_doc, plan, write_last_run
+from bot.vector_store import VectorStore, build_client, resolve_vector_store
 from bot.zendesk import Article, ScrapeError, fetch_articles
 
 log = logging.getLogger("main")
+
+LAST_RUN_PATH = Path("artifacts/last_run.json")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -35,6 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    started = time.monotonic()
     args = parse_args(argv)
     try:
         cfg = load_config(require_api_key=False)
@@ -55,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     written = failed = 0
-    docs: list[tuple[Article, Path]] = []
+    converted: list[tuple[Article, Path]] = []
     seen_slugs: set[str] = set()
     for a in articles:
         slug = slugify(a)
@@ -72,13 +69,13 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("Failed to convert article %s (%r)", a.id, a.title, exc_info=True)
             continue
         written += 1
-        docs.append((a, path))
+        converted.append((a, path))
         log.info("wrote %s", path)
 
     # Prune stale .md files left over from a previous run (e.g. renamed/unpublished
     # articles). Only do this when every article converted cleanly, so a partial
     # failure never deletes still-valid content for the articles that failed.
-    written_paths = {path for _, path in docs}
+    written_paths = {path for _, path in converted}
     if articles and failed == 0:
         for existing in out_dir.glob("*.md"):
             if existing not in written_paths:
@@ -99,48 +96,48 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    docs = [build_doc(a, path) for a, path in converted]
     try:
         client = build_client(cfg.openai_api_key)
         store_id = resolve_vector_store(client, cfg.vector_store_id, cfg.vector_store_name)
         store = VectorStore(
             client, store_id, chunk_size=cfg.chunk_size_tokens, chunk_overlap=cfg.chunk_overlap_tokens
         )
-        index = store.list_indexed()
+        files = store.list_files()
     except openai.APIError as exc:
         log.error("vector store unreachable: %s", exc)
         return 3
 
-    embedded = skipped = upload_failed = chunks = 0
-    for a, path in docs:
-        if str(a.id) in index:
-            skipped += 1
-            continue
-        text = path.read_text(encoding="utf-8")
-        attrs = {
-            "article_id": a.id,
-            "slug": path.stem,
-            "content_hash": content_hash(text),
-            "source_updated_at": a.updated_at,
-            "url": a.html_url,
-        }
-        n_chunks = estimate_chunks(text, cfg.chunk_size_tokens, cfg.chunk_overlap_tokens)
-        if cfg.dry_run:
-            log.info("DRY RUN would upload %s (chunks≈%d)", path.name, n_chunks)
-            continue
-        try:
-            store.add(path, attrs)
-        except UploadError as exc:
-            upload_failed += 1
-            log.warning("upload failed: %s", exc)
-            continue
-        embedded += 1
-        chunks += n_chunks
-
+    # Removals are unsafe after a partial convert: an article that failed to convert
+    # is still published and must not be dropped from the store.
+    p = plan(docs, files, scrape_complete=(failed == 0))
+    if p.removals_blocked:
+        log.warning(
+            "not removing any files: scraped %d article(s) (%d failed to convert) vs %d indexed; "
+            "refusing to delete on a suspiciously small or incomplete scrape",
+            len(articles), failed, len(files),
+        )
     log.info(
-        "RUN SUMMARY articles=%d written=%d failed=%d files_embedded=%d chunks_estimated=%d "
-        "skipped=%d upload_failed=%d dry_run=%s vector_store=%s",
-        len(articles), written, failed, embedded, chunks, skipped, upload_failed, cfg.dry_run, store_id,
+        "PLAN add=%d update=%d skip=%d remove=%d duplicates=%d",
+        len(p.to_add), len(p.to_update), len(p.to_skip), len(p.to_remove), len(p.duplicates),
     )
+
+    stats = apply(p, store, cfg.dry_run, chunk_size=cfg.chunk_size_tokens, chunk_overlap=cfg.chunk_overlap_tokens)
+    stats.scraped = len(articles)
+    stats.vector_store_id = store_id
+    stats.duration_s = time.monotonic() - started
+    stats.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    log.info(stats.summary_line())
+    try:
+        write_last_run(stats, LAST_RUN_PATH)
+    except OSError:
+        log.warning("could not write %s", LAST_RUN_PATH, exc_info=True)
+
+    # Spec 05: a few isolated failures are tolerable, >10% means something is wrong with the store.
+    attempted = stats.added + stats.updated + stats.removed + stats.failed
+    if stats.failed and stats.failed > 0.1 * attempted:
+        log.error("%d of %d store operations failed", stats.failed, attempted)
+        return 3
     return 0
 
 
