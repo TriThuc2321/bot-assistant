@@ -4,6 +4,7 @@ against the vector store (spec 03) -> RUN SUMMARY + artifacts/last_run.json."""
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import sys
 import time
@@ -24,9 +25,20 @@ log = logging.getLogger("main")
 LAST_RUN_PATH = Path("artifacts/last_run.json")
 
 
+def _non_negative_int(raw: str) -> int:
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return value
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync the help center into an OpenAI vector store.")
     parser.add_argument("--scrape-only", action="store_true", help="write .md files, skip the vector store")
+    parser.add_argument("--dry-run", action="store_true", help="print the sync plan, write nothing (= DRY_RUN=true)")
+    parser.add_argument(
+        "--limit", type=_non_negative_int, metavar="N", help="only fetch the first N articles (= MAX_ARTICLES)"
+    )
     return parser.parse_args(argv)
 
 
@@ -38,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"Config error: {exc}", file=sys.stderr)
         return 1
+    cfg = dataclasses.replace(
+        cfg,
+        dry_run=args.dry_run or cfg.dry_run,
+        max_articles=cfg.max_articles if args.limit is None else args.limit,
+    )
     setup_logging(cfg.log_level)
     if not args.scrape_only and not cfg.openai_api_key:
         log.error("Missing OPENAI_API_KEY (or API_KEY); pass --scrape-only to run without it")
@@ -108,14 +125,15 @@ def main(argv: list[str] | None = None) -> int:
         log.error("vector store unreachable: %s", exc)
         return 3
 
-    # Removals are unsafe after a partial convert: an article that failed to convert
-    # is still published and must not be dropped from the store.
-    p = plan(docs, files, scrape_complete=(failed == 0))
+    # Removals are unsafe after a partial convert (an article that failed to convert
+    # is still published) or a deliberately limited scrape (the rest of the help
+    # center still exists); either way the store must not lose those files.
+    p = plan(docs, files, scrape_complete=(failed == 0 and cfg.max_articles == 0))
     if p.removals_blocked:
         log.warning(
-            "not removing any files: scraped %d article(s) (%d failed to convert) vs %d indexed; "
+            "not removing any files: scraped %d article(s) (%d failed to convert, limit=%d) vs %d indexed; "
             "refusing to delete on a suspiciously small or incomplete scrape",
-            len(articles), failed, len(files),
+            len(articles), failed, cfg.max_articles, len(files),
         )
     log.info(
         "PLAN add=%d update=%d skip=%d remove=%d duplicates=%d",
