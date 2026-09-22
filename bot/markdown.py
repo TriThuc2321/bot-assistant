@@ -51,8 +51,6 @@ _BLOCK_IN_CELL = ("ul", "ol", "pre", "table", "blockquote", "h2", "h3", "h4", "h
 _ZENDESK_LEFTOVERS = ("was this article helpful",)
 
 
-# --------------------------------------------------------------------------- slug
-
 
 def slugify(article: Article) -> str:
     """`{id}-{title-slug}` derived from the html_url tail; lowercase [a-z0-9-]."""
@@ -68,12 +66,10 @@ def slugify(article: Article) -> str:
     return slug
 
 
-# ---------------------------------------------------------------------- pre-clean
-
 
 def _absolute(src: str, base_url: str) -> str:
     if src.startswith("//"):
-        return "https:" + src
+        return urlparse(base_url).scheme + ":" + src
     return urljoin(base_url, src)
 
 
@@ -113,10 +109,17 @@ def _preclean(body_html: str, base_url: str) -> BeautifulSoup:
             el.name = "blockquote"
 
     # Zendesk UI leftovers (not present in the API body, but cheap to guard).
+    # Only drop wrappers whose *entire* content is the leftover phrase itself;
+    # skip anything that also carries a link or nested block content, since
+    # get_text() concatenates descendants and could match on real content
+    # sitting next to the leftover text.
     for el in soup.find_all(("div", "p", "section")):
         text = el.get_text(" ", strip=True).lower()
-        if text and any(text.startswith(x) for x in _ZENDESK_LEFTOVERS):
-            el.decompose()
+        if not text or not any(text.startswith(x) for x in _ZENDESK_LEFTOVERS):
+            continue
+        if el.find(("a", "p", "div", "section", "table", "ul", "ol")) is not None:
+            continue
+        el.decompose()
 
     # Demote headings so the body never uses `#`. Walk h5 -> h1 to avoid double demotion.
     for level in range(5, 0, -1):
@@ -167,8 +170,6 @@ def _preclean(body_html: str, base_url: str) -> BeautifulSoup:
     return soup
 
 
-# --------------------------------------------------------------------- converter
-
 
 def _strip_tracking(href: str) -> str:
     parts = urlparse(href)
@@ -196,7 +197,10 @@ class _Converter(MarkdownConverter):
         heading_style = "atx"
         bullets = "-"
         strip_document = "strip"
-        escape_misc = False
+        # Escape plain text that would otherwise be reinterpreted as Markdown
+        # structure (leading '#', '1.', '-', backtick, '>', etc). markdownify
+        # defaults this to False; we want it on for byte-stable, non-lossy output.
+        escape_misc = True
         code_language_callback = staticmethod(_code_language)
         keep_inline_images_in = ["a", "td", "th", "li", "p", "strong", "em", "b", "i"]
 
@@ -216,21 +220,35 @@ class _Converter(MarkdownConverter):
             src = _absolute(src, self.base_url)
             el["src"] = src
         if not (el.get("alt") or "").strip():
-            el["alt"] = urlparse(src).path.rstrip("/").rsplit("/", 1)[-1] or "image"
+            if src.startswith("data:"):
+                el["alt"] = "image"
+            else:
+                el["alt"] = urlparse(src).path.rstrip("/").rsplit("/", 1)[-1] or "image"
         return super().convert_img(el, text, parent_tags)
 
     def convert_table(self, el, text, parent_tags):
         for cell in el.find_all(("td", "th")):
-            if cell.find(_BLOCK_IN_CELL) is not None or len(cell.find_all(("p", "br"))) > 1:
+            if cell.find(_BLOCK_IN_CELL) is not None or cell.find("br") is not None or len(cell.find_all("p")) > 1:
                 return "\n\n" + str(el) + "\n\n"
         return super().convert_table(el, text, parent_tags)
 
 
-# ------------------------------------------------------------------ post-process
-
 _FENCE_RE = re.compile(r"^\s*```")
 _HEADING_RE = re.compile(r"^#{1,6} ")
 _INNER_SPACES_RE = re.compile(r"(?<=\S) {2,}(?=\S)")
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _collapse_inner_spaces(ln: str) -> str:
+    """Collapse runs of 2+ spaces, but leave inline `code` spans untouched."""
+    out: list[str] = []
+    pos = 0
+    for m in _INLINE_CODE_RE.finditer(ln):
+        out.append(_INNER_SPACES_RE.sub(" ", ln[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_INNER_SPACES_RE.sub(" ", ln[pos:]))
+    return "".join(out)
 
 
 def _postprocess(text: str) -> str:
@@ -242,7 +260,7 @@ def _postprocess(text: str) -> str:
     for ln in lines:
         is_fence = bool(_FENCE_RE.match(ln))
         if not in_fence and not is_fence:
-            ln = _INNER_SPACES_RE.sub(" ", ln)
+            ln = _collapse_inner_spaces(ln)
         needs_gap = is_fence and not in_fence or (not in_fence and _HEADING_RE.match(ln))
         if needs_gap and out and out[-1] != "":
             out.append("")
@@ -258,8 +276,6 @@ def _postprocess(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip() + "\n"
 
-
-# --------------------------------------------------------------------- interface
 
 
 def to_markdown(article: Article) -> str:
@@ -281,6 +297,12 @@ def to_markdown(article: Article) -> str:
 
 
 def write_markdown(article: Article, out_dir: Path) -> Path:
+    """Write one article's Markdown to `out_dir/{slugify(article)}.md`.
+
+    Only creates/overwrites this article's own file; pruning stale files left
+    behind by renamed/unpublished articles is the caller's job (main.py does
+    this after a fully-successful run).
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{slugify(article)}.md"
