@@ -1,0 +1,62 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+    branches: [main]
+    # Optional: Only run on specific file changes
+    # paths:
+    #   - "**/*.py"
+    #   - "requirements.txt"
+    #   - "Dockerfile"
+    #   - ".github/workflows/**"
+
+concurrency:
+  group: claude-code-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review:
+    if: ${{ !github.event.pull_request.draft }}
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          track_progress: true
+          prompt: |
+            /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            This is a Python 3.12 project; the design lives in specs/*.md. Treat those
+            specs as the source of truth and flag code that contradicts them. Pay
+            particular attention to:
+            - Use of the sunset OpenAI Assistants API (client.beta.assistants / threads);
+              the specs require the Responses API + Vector Stores + file_search.
+            - Delta-sync correctness (spec 04): content hashing, update = delete old + upload
+              new, and the added/updated/skipped summary.
+            - Secrets or API keys read from anywhere other than environment variables.
+            - Unhandled HTTP errors, missing pagination/rate-limit handling against Zendesk.
+            - Tests (spec 07) that make real network calls instead of mocking.
+
+            If the review finds no issues worth reporting, do not post any inline
+            comments and reply with a single line: LGTM
+          # The code-review plugin fans out to parallel subagents, so Agent must be allowed
+          claude_args: '--allowedTools "Agent,mcp__github_inline_comment__create_inline_comment,mcp__github_comment__update_claude_comment,Read,Grep,Glob,Bash(git fetch:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh api:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)"'
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
