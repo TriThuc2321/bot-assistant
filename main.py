@@ -1,12 +1,15 @@
-"""Entrypoint. Currently: scrape only (spec 01). Later specs add convert/diff/upload."""
+"""Entrypoint. Currently: scrape (spec 01) + convert to Markdown (spec 02).
+Later specs add diff/upload."""
 
 from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 from bot.config import ConfigError, load_config
 from bot.logging_setup import setup_logging
+from bot.markdown import write_markdown
 from bot.zendesk import ScrapeError, fetch_articles
 
 log = logging.getLogger("main")
@@ -26,9 +29,22 @@ def main() -> int:
         log.error("%s", exc)
         return 2
 
-    for a in articles[:5]:
-        log.info("  %s  [%s]  %s", a.id, a.section_name or "-", a.html_url)
-    log.info("RUN SUMMARY articles=%d", len(articles))
+    out_dir = Path(cfg.output_dir)
+    written = failed = 0
+    for a in articles:
+        try:
+            path = write_markdown(a, out_dir)
+        except Exception as exc:  # one bad article must not kill the run
+            failed += 1
+            log.warning("Failed to convert article %s (%r): %s", a.id, a.title, exc)
+            continue
+        written += 1
+        log.debug("wrote %s", path)
+
+    log.info(
+        "RUN SUMMARY articles=%d written=%d failed=%d output_dir=%s",
+        len(articles), written, failed, out_dir,
+    )
     return 0
 
 
