@@ -57,7 +57,7 @@ No lint/format command is configured in this repo.
   deletes still-good content), then uploads every article whose `article_id` isn't already
   indexed (spec 04 replaces this with hash-based add/update/skip/remove). `DRY_RUN` still
   resolves/lists the store but writes nothing. Exit codes: `0` ok, `1` config error,
-  `2` scrape failed, `3` all articles failed to convert or vector store unreachable.
+  `2` scrape failed (can't list articles, or none converted), `3` vector store unreachable.
 - `articles/` — generated Markdown output, one file per article, named `{slug}.md`.
 
 ## Working in this repo

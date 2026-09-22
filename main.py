@@ -87,9 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     elif failed:
         log.warning("skipping stale-file cleanup: %d article(s) failed to convert this run", failed)
 
+    # No usable content came out of the scrape/convert stage, so this is a scrape
+    # failure (2), not a vector-store one; 3 is reserved for the store per spec 05.
     if articles and written == 0:
         log.error("all %d article(s) failed to convert; treating run as failed", len(articles))
-        return 3
+        return 2
     if args.scrape_only:
         log.info(
             "RUN SUMMARY articles=%d written=%d failed=%d output_dir=%s (scrape only)",

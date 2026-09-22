@@ -17,7 +17,7 @@
 |---|---|
 | 0 | Run completed (including runs where some single files failed but ≤ threshold) |
 | 1 | Config error (missing key) |
-| 2 | Scrape failed (can't list articles) |
+| 2 | Scrape failed (can't list articles, or every article failed to convert) |
 | 3 | Vector store unreachable / > 10% of uploads failed |
 
 Brief requires: `docker run -e API_KEY=... <image>` runs **once and exits 0**.
