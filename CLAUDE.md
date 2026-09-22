@@ -11,17 +11,20 @@ The full design lives in `specs/00-overview.md` through `specs/07-assistant-test
 — read the relevant spec before implementing a piece of it; each spec maps to one module.
 
 Build order (also the intended commit order): scraper → converter → uploader → delta →
-docker → deploy → tests → readme. Specs 00–04 (`bot/zendesk.py`, `bot/markdown.py`,
-`bot/vector_store.py`, `bot/sync.py`) are implemented so far; Dockerfile/CI (specs 05–06)
-are not.
+docker → deploy → tests → readme. Specs 00–05 (`bot/zendesk.py`, `bot/markdown.py`,
+`bot/vector_store.py`, `bot/sync.py`, `main.py` + `Dockerfile`) are implemented so far;
+the daily CI job (spec 06) is not.
 
 ## Commands
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # runtime deps (requirements.txt) + pytest
 python main.py                 # scrape + convert + delta sync into the vector store
-DRY_RUN=true python main.py    # print the add/update/remove plan; lists the store, writes nothing
+python main.py --dry-run       # (or DRY_RUN=true) print the add/update/remove plan; lists the store, writes nothing
+python main.py --limit 5       # (or MAX_ARTICLES=5) first N articles only; never removes files from the store
 python main.py --scrape-only   # write .md files only; no API key needed
+docker build -t kb-sync .
+docker run --rm -e API_KEY=sk-... kb-sync    # runs once, logs RUN SUMMARY, exits 0
 pytest                         # run all tests, no network required
 pytest tests/test_markdown.py  # run a single test file
 pytest tests/test_markdown.py::test_name -v   # run a single test
@@ -67,11 +70,15 @@ No lint/format command is configured in this repo.
   `artifacts/last_run.json`).
 - `main.py` — orchestrates scrape → convert → write `.md` files, prunes stale `.md` files
   from previous runs (only when every article converted cleanly, so a partial failure never
-  deletes still-good content), then `plan()` + `apply()` against the store, logs one
+  deletes still-good content), then `plan()` + `apply()` against the store (a `--limit` /
+  `MAX_ARTICLES` run passes `scrape_complete=False`, so it never removes files), logs one
   `RUN SUMMARY` line and writes `artifacts/last_run.json`. `DRY_RUN` still resolves/lists
   the store but writes nothing. Exit codes: `0` ok, `1` config error, `2` scrape failed
   (can't list articles, or none converted), `3` vector store unreachable or > 10% of store
   operations failed.
+- `Dockerfile` — `python:3.12-slim`, non-root user, pre-downloads tiktoken's `o200k_base`
+  at build time (`TIKTOKEN_CACHE_DIR=/app/.tiktoken`) so runs don't fetch it. Only
+  `requirements.txt` goes into the image; `pytest` lives in `requirements-dev.txt`.
 - `articles/` — generated Markdown output, one file per article, named `{slug}.md`.
 
 ## Working in this repo
