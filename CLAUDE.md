@@ -6,19 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OptiBot Mini-Clone: a single Python job that scrapes OptiSigns' Zendesk Help Center,
 converts each article to deterministic Markdown, and uploads them to an OpenAI Vector Store
-for a support-bot assistant (delta detection of new/changed articles is spec 04, not yet built).
+for a support-bot assistant, uploading only new/changed articles (hash-based delta sync).
 The full design lives in `specs/00-overview.md` through `specs/07-assistant-tests-readme.md`
 — read the relevant spec before implementing a piece of it; each spec maps to one module.
 
 Build order (also the intended commit order): scraper → converter → uploader → delta →
-docker → deploy → tests → readme. Specs 00–03 (`bot/zendesk.py`, `bot/markdown.py`,
-`bot/vector_store.py`) are implemented so far; `bot/sync.py` (spec 04) does not exist yet.
+docker → deploy → tests → readme. Specs 00–04 (`bot/zendesk.py`, `bot/markdown.py`,
+`bot/vector_store.py`, `bot/sync.py`) are implemented so far; Dockerfile/CI (specs 05–06)
+are not.
 
 ## Commands
 
 ```bash
 pip install -r requirements.txt
-python main.py                 # scrape + convert + upload anything not yet in the store
+python main.py                 # scrape + convert + delta sync into the vector store
+DRY_RUN=true python main.py    # print the add/update/remove plan; lists the store, writes nothing
 python main.py --scrape-only   # write .md files only; no API key needed
 pytest                         # run all tests, no network required
 pytest tests/test_markdown.py  # run a single test file
@@ -47,17 +49,29 @@ No lint/format command is configured in this repo.
   `resolve_vector_store()` uses `VECTOR_STORE_ID` if set, else find-or-create by name.
   `VectorStore.add()` uploads with the `slug.md` filename, attaches with an explicit static
   chunking strategy and per-file attributes (`article_id`, `slug`, `content_hash`,
-  `source_updated_at`, `url` — these are spec 04's sync state), polls to `completed`, and on
+  `source_updated_at`, `url` — these are the sync state), polls to `completed`, and on
   failure deletes both the vs-file and the File before raising `UploadError` (no orphans).
   `remove()` tolerates 404s so it's retry-safe; `replace()` uploads before deleting.
-  `estimate_chunks()` is a local tiktoken estimate — the API never reports chunk counts.
-  Tests stub `count_tokens` so tiktoken never downloads its encoding.
+  `list_files()` returns the raw listing (foreign files included, `article_id=""`);
+  deduplication lives in `bot/sync.plan()`. `estimate_chunks()` is a local tiktoken
+  estimate — the API never reports chunk counts. Tests stub `count_tokens` so tiktoken
+  never downloads its encoding.
+- `bot/sync.py` — delta detection. `plan(docs, files, scrape_complete=)` is pure: newest
+  file per `article_id` wins (older copies → `duplicates`, always deleted), files without
+  `article_id` are ignored, then add / update (hash differs **or** indexed status isn't
+  `completed`) / skip / remove. Removals are suppressed (`removals_blocked`) when the scrape
+  is empty, incomplete, or < 50% of the indexed count, so an API hiccup can't wipe the store.
+  `apply()` runs adds → updates (`replace`, upload-then-delete) → duplicates → removals,
+  counting per-file failures instead of aborting; `dry_run` logs `DRY RUN would …` and
+  makes no store calls. Returns `RunStats` (`summary_line()`, `write_last_run()` →
+  `artifacts/last_run.json`).
 - `main.py` — orchestrates scrape → convert → write `.md` files, prunes stale `.md` files
   from previous runs (only when every article converted cleanly, so a partial failure never
-  deletes still-good content), then uploads every article whose `article_id` isn't already
-  indexed (spec 04 replaces this with hash-based add/update/skip/remove). `DRY_RUN` still
-  resolves/lists the store but writes nothing. Exit codes: `0` ok, `1` config error,
-  `2` scrape failed (can't list articles, or none converted), `3` vector store unreachable.
+  deletes still-good content), then `plan()` + `apply()` against the store, logs one
+  `RUN SUMMARY` line and writes `artifacts/last_run.json`. `DRY_RUN` still resolves/lists
+  the store but writes nothing. Exit codes: `0` ok, `1` config error, `2` scrape failed
+  (can't list articles, or none converted), `3` vector store unreachable or > 10% of store
+  operations failed.
 - `articles/` — generated Markdown output, one file per article, named `{slug}.md`.
 
 ## Working in this repo

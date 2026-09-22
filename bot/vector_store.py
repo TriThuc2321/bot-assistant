@@ -125,18 +125,6 @@ class VectorStore:
         """Every file in the store, including ones we did not upload (no `article_id`)."""
         return [_to_indexed(f) for f in self.client.vector_stores.files.list(self.store_id)]
 
-    def list_indexed(self) -> dict[str, IndexedFile]:
-        """Files keyed by `article_id`; newest wins when a crashed run left duplicates."""
-        index: dict[str, IndexedFile] = {}
-        for f in self.list_files():
-            if not f.article_id:
-                log.warning("ignoring file %s: no article_id attribute", f.id)
-                continue
-            current = index.get(f.article_id)
-            if current is None or f.created_at > current.created_at:
-                index[f.article_id] = f
-        return index
-
     def add(self, path: Path, attrs: dict) -> str:
         """Upload `path` and attach it to the store; returns the vector-store file id."""
         path = Path(path)
