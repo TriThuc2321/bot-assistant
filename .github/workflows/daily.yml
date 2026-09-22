@@ -1,0 +1,61 @@
+name: daily-kb-sync
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # 02:00 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# A manual run and the cron must never sync the same vector store at the same time.
+concurrency:
+  group: daily-kb-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: docker build -t kb-sync .
+
+      # shell: bash turns on pipefail, so a failing sync isn't masked by tee.
+      # The container runs as a different uid than the runner, hence chmod 777.
+      # Logging goes to stderr, hence 2>&1.
+      - name: Sync knowledge base
+        shell: bash
+        run: |
+          mkdir -p artifacts && chmod 777 artifacts
+          docker run --rm \
+            -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+            -e VECTOR_STORE_ID="${{ secrets.VECTOR_STORE_ID }}" \
+            -v "$PWD/artifacts:/app/artifacts" \
+            kb-sync 2>&1 | tee artifacts/run.log
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Run summary"
+            echo '```'
+            grep 'RUN SUMMARY' artifacts/run.log || echo "no RUN SUMMARY line (run failed early)"
+            echo '```'
+            if [ -f artifacts/last_run.json ]; then
+              echo "### last_run.json"
+              echo '```json'
+              cat artifacts/last_run.json
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: last-run
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: warn

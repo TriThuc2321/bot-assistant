@@ -12,8 +12,8 @@ The full design lives in `specs/00-overview.md` through `specs/07-assistant-test
 
 Build order (also the intended commit order): scraper → converter → uploader → delta →
 docker → deploy → tests → readme. Specs 00–05 (`bot/zendesk.py`, `bot/markdown.py`,
-`bot/vector_store.py`, `bot/sync.py`, `main.py` + `Dockerfile`) are implemented so far;
-the daily CI job (spec 06) is not.
+`bot/vector_store.py`, `bot/sync.py`, `main.py` + `Dockerfile`, and the daily CI job in
+`.github/workflows/daily.yml`) are implemented so far; spec 07 (assistant tests + README) is not.
 
 ## Commands
 
@@ -79,6 +79,13 @@ No lint/format command is configured in this repo.
 - `Dockerfile` — `python:3.12-slim`, non-root user, pre-downloads tiktoken's `o200k_base`
   at build time (`TIKTOKEN_CACHE_DIR=/app/.tiktoken`) so runs don't fetch it. Only
   `requirements.txt` goes into the image; `pytest` lives in `requirements-dev.txt`.
+- `.github/workflows/daily.yml` — spec 06: cron `0 2 * * *` + `workflow_dispatch`, builds
+  the image and runs it with `OPENAI_API_KEY` / `VECTOR_STORE_ID` repo secrets, uploads
+  `artifacts/` (`run.log`, `last_run.json`) as the `last-run` artifact and writes the
+  `RUN SUMMARY` line to the job summary. Gotchas it handles: logs go to stderr (`2>&1`),
+  `shell: bash` for pipefail so `tee` doesn't mask failures, and a world-writable
+  `artifacts/` because the container's `app` uid differs from the runner's. Schedules only
+  fire from `main`.
 - `articles/` — generated Markdown output, one file per article, named `{slug}.md`.
 
 ## Working in this repo
