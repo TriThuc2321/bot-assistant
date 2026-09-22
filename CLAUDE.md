@@ -11,9 +11,8 @@ The full design lives in `specs/00-overview.md` through `specs/07-assistant-test
 — read the relevant spec before implementing a piece of it; each spec maps to one module.
 
 Build order (also the intended commit order): scraper → converter → uploader → delta →
-docker → deploy → tests → readme. Specs 00–05 (`bot/zendesk.py`, `bot/markdown.py`,
-`bot/vector_store.py`, `bot/sync.py`, `main.py` + `Dockerfile`, and the daily CI job in
-`.github/workflows/daily.yml`) are implemented so far; spec 07 (assistant tests + README) is not.
+docker → deploy → tests → readme. All specs (00–07) are implemented. The OptiBot assistant
+itself lives in the OpenAI Playground (spec 07); `scripts/ask.py` is the API fallback.
 
 ## Commands
 
@@ -25,6 +24,7 @@ python main.py --limit 5       # (or MAX_ARTICLES=5) first N articles only; neve
 python main.py --scrape-only   # write .md files only; no API key needed
 docker build -t kb-sync .
 docker run --rm -e API_KEY=sk-... kb-sync    # runs once, logs RUN SUMMARY, exits 0
+python -m scripts.ask "How do I add a YouTube video?"   # ask OptiBot via Responses API + file_search
 pytest                         # run all tests, no network required
 pytest tests/test_markdown.py  # run a single test file
 pytest tests/test_markdown.py::test_name -v   # run a single test
@@ -86,6 +86,13 @@ No lint/format command is configured in this repo.
   `shell: bash` for pipefail so `tee` doesn't mask failures, and a world-writable
   `artifacts/` because the container's `app` uid differs from the runner's. Schedules only
   fire from `main`.
+- `scripts/ask.py` — spec 07 fallback for the Playground assistant: `SYSTEM_PROMPT` must stay
+  byte-identical to the brief (`tests/test_ask.py` enforces it); calls `client.responses.create`
+  with a `file_search` tool on the resolved store and prints the answer + cited filenames.
+  Run with `python -m` so `bot` is importable.
+- `.github/workflows/tests.yml` — `pytest` on every push and on PRs to `main`.
+- `docs/samples/` — a few committed converted articles for reviewers (kept out of `articles/`,
+  which `main.py` prunes). `docs/screenshots/` holds the Playground screenshots the README embeds.
 - `articles/` — generated Markdown output, one file per article, named `{slug}.md`.
 
 ## Working in this repo
