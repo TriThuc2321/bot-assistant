@@ -5,20 +5,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 OptiBot Mini-Clone: a single Python job that scrapes OptiSigns' Zendesk Help Center,
-converts each article to deterministic Markdown, and (in later specs, not yet built)
-uploads new/changed articles to an OpenAI Vector Store for a support-bot assistant.
+converts each article to deterministic Markdown, and uploads them to an OpenAI Vector Store
+for a support-bot assistant (delta detection of new/changed articles is spec 04, not yet built).
 The full design lives in `specs/00-overview.md` through `specs/07-assistant-tests-readme.md`
 — read the relevant spec before implementing a piece of it; each spec maps to one module.
 
 Build order (also the intended commit order): scraper → converter → uploader → delta →
-docker → deploy → tests → readme. Only specs 00–02 (`bot/zendesk.py`, `bot/markdown.py`)
-are implemented so far; `bot/vector_store.py` and `bot/sync.py` (specs 03–04) do not exist yet.
+docker → deploy → tests → readme. Specs 00–03 (`bot/zendesk.py`, `bot/markdown.py`,
+`bot/vector_store.py`) are implemented so far; `bot/sync.py` (spec 04) does not exist yet.
 
 ## Commands
 
 ```bash
 pip install -r requirements.txt
-python main.py                 # scrape + convert only for now (no uploader yet)
+python main.py                 # scrape + convert + upload anything not yet in the store
+python main.py --scrape-only   # write .md files only; no API key needed
 pytest                         # run all tests, no network required
 pytest tests/test_markdown.py  # run a single test file
 pytest tests/test_markdown.py::test_name -v   # run a single test
@@ -42,11 +43,21 @@ No lint/format command is configured in this repo.
   single-column tables → blockquotes (Zendesk's callout idiom), tables with block content in
   a cell fall back to raw HTML instead of lossy GFM conversion. `slugify()` derives
   `{id}-{title-slug}` from the article's `html_url` tail.
-- `main.py` — orchestrates scrape → convert → write `.md` files, then prunes stale `.md`
-  files from previous runs — but only when every article in the run converted cleanly, so a
-  partial failure never deletes still-good content. Exit codes: `0` ok, `1` config error,
-  `2` scrape failed, `3` all articles failed to convert. (Later specs add vector-store
-  upload/delta/prune logic on top of this, per `specs/05-main-and-docker.md`.)
+- `bot/vector_store.py` — OpenAI Files + Vector Stores API only (no `client.beta.assistants`).
+  `resolve_vector_store()` uses `VECTOR_STORE_ID` if set, else find-or-create by name.
+  `VectorStore.add()` uploads with the `slug.md` filename, attaches with an explicit static
+  chunking strategy and per-file attributes (`article_id`, `slug`, `content_hash`,
+  `source_updated_at`, `url` — these are spec 04's sync state), polls to `completed`, and on
+  failure deletes both the vs-file and the File before raising `UploadError` (no orphans).
+  `remove()` tolerates 404s so it's retry-safe; `replace()` uploads before deleting.
+  `estimate_chunks()` is a local tiktoken estimate — the API never reports chunk counts.
+  Tests stub `count_tokens` so tiktoken never downloads its encoding.
+- `main.py` — orchestrates scrape → convert → write `.md` files, prunes stale `.md` files
+  from previous runs (only when every article converted cleanly, so a partial failure never
+  deletes still-good content), then uploads every article whose `article_id` isn't already
+  indexed (spec 04 replaces this with hash-based add/update/skip/remove). `DRY_RUN` still
+  resolves/lists the store but writes nothing. Exit codes: `0` ok, `1` config error,
+  `2` scrape failed, `3` all articles failed to convert or vector store unreachable.
 - `articles/` — generated Markdown output, one file per article, named `{slug}.md`.
 
 ## Working in this repo
