@@ -3,7 +3,11 @@ name: daily-kb-sync
 on:
   schedule:
     - cron: "0 2 * * *" # 02:00 UTC daily
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      max_articles:
+        description: "Max articles to sync (0 = all)"
+        default: "100"
 
 permissions:
   contents: read
@@ -32,6 +36,7 @@ jobs:
           docker run --rm \
             -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
             -e VECTOR_STORE_ID="${{ secrets.VECTOR_STORE_ID }}" \
+            -e MAX_ARTICLES="${{ inputs.max_articles || '100' }}" \
             -v "$PWD/artifacts:/app/artifacts" \
             kb-sync 2>&1 | tee artifacts/run.log
 
